@@ -1,4 +1,4 @@
-# Smanji slike
+# Optimiziraj slike
 
 Kompresija i promjena veličine slika, JPG/WebP/PNG, uklanja EXIF i GPS podatke.
 
