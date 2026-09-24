@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="hr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smanji slike</title>
+<meta name="description" content="Kompresija i promjena veličine slika (JPG, WebP, PNG) s uklanjanjem EXIF i GPS podataka. Više slika odjednom, u pregledniku, bez slanja na poslužitelj.">
+<link rel="icon" href="zajednicko/logo.svg">
+<link rel="stylesheet" href="zajednicko/app-bonic.css">
+<style>
+  .postavke { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); align-items: end; }
+  .postavke output { color: var(--tekst); font-weight: 600; }
+  .sazetak { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; justify-content: space-between; margin: 16px 0 12px; }
+  .sazetak .brojke { font-size: 15px; }
+  .sazetak .brojke b { font-size: 18px; }
+  .popis { display: flex; flex-direction: column; gap: 8px; }
+  .sl { display: grid; grid-template-columns: 64px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 8px 10px; background: var(--plo); border: 1px solid var(--crta); border-radius: 12px; }
+  .sl img { width: 64px; height: 64px; object-fit: cover; border-radius: 8px; background: var(--polje); }
+  .sl .ime { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sl .detalji { font-size: 13px; color: var(--blijedo); display: flex; flex-wrap: wrap; gap: 4px 12px; }
+  .sl .usteda { font-weight: 700; color: var(--ok); }
+  .sl .usteda.vise { color: var(--greska); }
+  .sl .desno { display: flex; gap: 6px; align-items: center; }
+  @media (max-width: 560px) { .sl { grid-template-columns: 48px minmax(0, 1fr); } .sl img { width: 48px; height: 48px; } .sl .desno { grid-column: 1 / -1; } }
+</style>
+</head>
+<body data-alat="slike-kompresija">
+<header class="ab-vrh"></header>
+
+<main class="ab-omot">
+  <section class="ab-uvod">
+    <span class="ab-ikona"><span data-ik="smanji"></span></span>
+    <div>
+      <h1>Smanji slike</h1>
+      <p>Smanji veličinu fotografija za e-poštu, web ili prijave — više slika odjednom. Pri pretvorbi se uklanjaju EXIF podaci, uključujući GPS lokaciju gdje je slika snimljena.</p>
+    </div>
+  </section>
+
+  <section class="kartica">
+    <div class="postavke">
+      <div class="polje"><label for="format">Format</label>
+        <select id="format"><option value="image/jpeg">JPG — fotografije</option><option value="image/webp">WebP — najmanje datoteke</option><option value="image/png">PNG — bez gubitka, prozirnost</option><option value="izvorni">Isti kao izvornik</option></select></div>
+      <div class="polje"><label for="kvaliteta">Kvaliteta <output id="kvalitetaIzlaz">80 %</output></label><input type="range" id="kvaliteta" min="30" max="100" value="80"></div>
+      <div class="polje"><label for="maks">Najveća dimenzija</label>
+        <select id="maks"><option value="0">Bez promjene</option><option value="3840">3840 px (4K)</option><option value="2560">2560 px</option><option value="1920" selected>1920 px (Full HD)</option><option value="1280">1280 px</option><option value="1024">1024 px</option><option value="800">800 px</option><option value="400">400 px</option></select></div>
+      <div class="polje"><label for="cilj">Najviše KB po slici <small>neobavezno</small></label><input id="cilj" type="number" min="10" step="10" placeholder="npr. 500"></div>
+    </div>
+    <p class="napomena" style="margin-top:10px">Ako upišeš najveći broj KB, kvaliteta se sama spušta dok slika ne stane (za JPG i WebP).</p>
+  </section>
+
+  <div class="dropzona" id="drop" style="margin-top:16px"><span data-ik="upload"></span><b>Ubaci slike</b><span>JPG, PNG, WEBP, GIF, BMP — koliko god ih treba</span></div>
+
+  <div id="rezultati" hidden>
+    <div class="sazetak">
+      <div class="brojke" id="brojke"></div>
+      <div class="gumbi">
+        <button type="button" class="gumb glavni" id="sve"><span data-ik="preuzmi"></span>Preuzmi sve (ZIP)</button>
+        <button type="button" class="gumb tekstualni opasno" id="ocisti">Očisti</button>
+      </div>
+    </div>
+    <div class="popis" id="popis"></div>
+  </div>
+</main>
+
+<footer class="ab-dno"></footer>
+<script src="zajednicko/app-bonic.js"></script>
+<script src="lib/jszip.min.js"></script>
+<script>
+'use strict';
+const { $, esc, ikona, obavijest, spremi, dropzona, velicina } = AB;
+let slike = [];   // { id, dat, bitmap, rez: { blob, w, h, kv } }
+let brojac = 0, verzija = 0;
+const EKST = { 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/png': 'png', 'image/gif': 'gif', 'image/bmp': 'bmp' };
+
+async function dodaj(dat) {
+  const s = dat.filter(f => f.type.startsWith('image/'));
+  if (!s.length) return obavijest('Odaberi slike.');
+  for (const f of s) {
+    try { slike.push({ id: ++brojac, dat: f, bitmap: await createImageBitmap(f, { imageOrientation: 'from-image' }), url: URL.createObjectURL(f) }); }
+    catch { obavijest(`„${f.name}” se ne može otvoriti.`); }
+  }
+  obradi();
+}
+
+async function kodiraj(s, tip, kv) {
+  const maks = +$('#maks').value;
+  let w = s.bitmap.width, h = s.bitmap.height;
+  const k = maks ? Math.min(1, maks / Math.max(w, h)) : 1;
+  w = Math.max(1, Math.round(w * k)); h = Math.max(1, Math.round(h * k));
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const x = c.getContext('2d');
+  if (tip === 'image/jpeg') { x.fillStyle = '#fff'; x.fillRect(0, 0, w, h); }
+  x.imageSmoothingQuality = 'high';
+  x.drawImage(s.bitmap, 0, 0, w, h);
+  const blob = await new Promise(ok => c.toBlob(ok, tip, kv));
+  c.width = c.height = 0;
+  return { blob, w, h };
+}
+
+async function obradiJednu(s, v) {
+  let tip = $('#format').value;
+  if (tip === 'izvorni') tip = ['image/jpeg', 'image/webp', 'image/png'].includes(s.dat.type) ? s.dat.type : 'image/jpeg';
+  let kv = +$('#kvaliteta').value / 100;
+  const cilj = +$('#cilj').value * 1024;
+  let r = await kodiraj(s, tip, kv);
+  if (cilj && r.blob.size > cilj && tip !== 'image/png') {
+    // binarno traženje kvalitete
+    let lo = .05, hi = kv, najbolji = null;
+    for (let i = 0; i < 7; i++) {
+      const m = (lo + hi) / 2, t = await kodiraj(s, tip, m);
+      if (t.blob.size <= cilj) { najbolji = { ...t, kv: m }; lo = m; } else hi = m;
+      if (v !== verzija) return;
+    }
+    if (najbolji) { r = najbolji; kv = najbolji.kv; }
+  }
+  if (v !== verzija) return;
+  s.rez = { ...r, kv, tip };
+}
+
+async function obradi() {
+  const v = ++verzija;
+  $('#rezultati').hidden = !slike.length;
+  nacrtaj();
+  for (const s of slike) {
+    s.rez = null;
+  }
+  nacrtaj();
+  for (const s of slike) {
+    await obradiJednu(s, v);
+    if (v !== verzija) return;
+    nacrtaj();
+  }
+}
+
+function nacrtaj() {
+  let prije = 0, poslije = 0, gotovo = 0;
+  $('#popis').innerHTML = slike.map(s => {
+    prije += s.dat.size;
+    const r = s.rez;
+    if (r) { poslije += r.blob.size; gotovo++; }
+    const post = r ? Math.round((1 - r.blob.size / s.dat.size) * 100) : 0;
+    return `<div class="sl" data-id="${s.id}">
+      <img src="${s.url}" alt="">
+      <div><div class="ime" title="${esc(s.dat.name)}">${esc(s.dat.name)}</div>
+        <div class="detalji"><span>${s.bitmap.width}×${s.bitmap.height} · ${velicina(s.dat.size)}</span>
+        ${r ? `<span>→ ${r.w}×${r.h} · <b>${velicina(r.blob.size)}</b></span><span class="usteda${post < 0 ? ' vise' : ''}">${post >= 0 ? '−' + post : '+' + -post} %</span>${r.tip !== 'image/png' ? `<span>kvaliteta ${Math.round(r.kv * 100)} %</span>` : ''}` : '<span>obrađujem…</span>'}</div></div>
+      <div class="desno"><button type="button" class="gumb" data-preuzmi="${s.id}" ${r ? '' : 'disabled'}>${ikona('preuzmi')}Preuzmi</button><button type="button" class="gumb tekstualni" data-makni="${s.id}" aria-label="Ukloni">${ikona('x')}</button></div>
+    </div>`;
+  }).join('');
+  $('#brojke').innerHTML = slike.length ? `${slike.length} ${AB.mn(slike.length, 'slika', 'slike', 'slika')} · <b>${velicina(prije)}</b> → <b>${gotovo === slike.length ? velicina(poslije) : '…'}</b>${gotovo === slike.length && prije ? ` <span class="pilula ok">ušteda ${Math.max(0, Math.round((1 - poslije / prije) * 100))} %</span>` : ''}` : '';
+  $('#sve').disabled = gotovo !== slike.length || !slike.length;
+}
+
+const imeVan = s => s.dat.name.replace(/\.[^.]+$/, '') + '.' + EKST[s.rez.tip];
+$('#popis').addEventListener('click', e => {
+  const p = e.target.closest('[data-preuzmi]'), m = e.target.closest('[data-makni]');
+  if (p) { const s = slike.find(x => x.id === +p.dataset.preuzmi); spremi(s.rez.blob, imeVan(s)); }
+  if (m) { const i = slike.findIndex(x => x.id === +m.dataset.makni); URL.revokeObjectURL(slike[i].url); slike.splice(i, 1); $('#rezultati').hidden = !slike.length; nacrtaj(); }
+});
+$('#sve').onclick = async () => {
+  if (slike.length === 1) return spremi(slike[0].rez.blob, imeVan(slike[0]));
+  const zip = new JSZip(), imena = new Set();
+  for (const s of slike) {
+    let ime = imeVan(s), n = 1;
+    while (imena.has(ime)) ime = imeVan(s).replace(/(\.\w+)$/, `-${++n}$1`);
+    imena.add(ime);
+    zip.file(ime, s.rez.blob);
+  }
+  spremi(await zip.generateAsync({ type: 'blob' }), 'smanjene-slike.zip');
+};
+$('#ocisti').onclick = () => { slike.forEach(s => URL.revokeObjectURL(s.url)); slike = []; verzija++; $('#rezultati').hidden = true; };
+
+let tajmer;
+const promjena = () => { $('#kvalitetaIzlaz').textContent = $('#kvaliteta').value + ' %'; $('#kvaliteta').disabled = $('#format').value === 'image/png'; clearTimeout(tajmer); tajmer = setTimeout(obradi, 300); };
+['format', 'kvaliteta', 'maks', 'cilj'].forEach(id => $('#' + id).addEventListener('input', promjena));
+dropzona($('#drop'), dodaj, { accept: 'image/*' });
+</script>
+</body>
+</html>
